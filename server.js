@@ -1,23 +1,28 @@
 const express = require('express');
-const Database = require('better-sqlite3');
+const { Pool } = require('pg');
 const path = require('path');
 
 const app = express();
-const db = new Database('contacts.db');
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+});
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS contacts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    email TEXT NOT NULL UNIQUE,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-`);
+async function init() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS contacts (
+      id SERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+}
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.post('/api/contacts', (req, res) => {
+app.post('/api/contacts', async (req, res) => {
   const { name, email } = req.body;
 
   if (!name || !email) {
@@ -30,21 +35,25 @@ app.post('/api/contacts', (req, res) => {
   }
 
   try {
-    const stmt = db.prepare('INSERT INTO contacts (name, email) VALUES (?, ?)');
-    const result = stmt.run(name.trim(), email.trim().toLowerCase());
-    res.json({ id: result.lastInsertRowid, name, email });
+    const result = await pool.query(
+      'INSERT INTO contacts (name, email) VALUES ($1, $2) RETURNING id',
+      [name.trim(), email.trim().toLowerCase()]
+    );
+    res.json({ id: result.rows[0].id, name, email });
   } catch (err) {
-    if (err.message.includes('UNIQUE constraint failed')) {
+    if (err.code === '23505') {
       return res.status(409).json({ error: 'This email is already registered.' });
     }
     res.status(500).json({ error: 'Server error.' });
   }
 });
 
-app.get('/api/contacts', (req, res) => {
-  const contacts = db.prepare('SELECT * FROM contacts ORDER BY created_at DESC').all();
-  res.json(contacts);
+app.get('/api/contacts', async (req, res) => {
+  const result = await pool.query('SELECT * FROM contacts ORDER BY created_at DESC');
+  res.json(result.rows);
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`));
+init()
+  .then(() => app.listen(PORT, () => console.log(`Server running at http://localhost:${PORT}`)))
+  .catch(err => { console.error('DB init failed:', err); process.exit(1); });
